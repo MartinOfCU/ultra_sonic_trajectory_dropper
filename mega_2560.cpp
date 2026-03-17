@@ -10,8 +10,8 @@ int calibration_long_press = 7000; // milliseconds to hold the button to go into
 int arming_long_press = 2000; // arm the program
 int short_press = 200;
 
-int servo_min_angle = 0;
-int servo_max_angle = 110;
+int servo_close_angle = 0;
+int servo_open_angle = 70;
 
 // pins
 const int BUTTON_PIN = 7; // Pin connected to the button
@@ -190,8 +190,17 @@ class MpuModule {
         sumY += (Wire.read() << 8) | Wire.read();
         sumZ += (Wire.read() << 8) | Wire.read();
 
+        // every 10*5 miliseconds flash the led
+        if ((i % 10) < 7) {
+          digitalWrite(LED_PIN, HIGH); // Turn on LED
+        }
+        else {
+          digitalWrite(LED_PIN, LOW); // Turn off LED
+        }
+
         delay(5);
       }
+      digitalWrite(LED_PIN, LOW); // Turn off LED
 
       this->accX_offset = sumX / 200;
       this->accY_offset = sumY / 200;
@@ -215,8 +224,17 @@ class MpuModule {
         sumY += (Wire.read() << 8) | Wire.read();
         sumZ += (Wire.read() << 8) | Wire.read();
 
+        // every 10*5 miliseconds flash the led
+        if ((i % 10) < 4) {
+          digitalWrite(LED_PIN, HIGH); // Turn on LED
+        }
+        else {
+          digitalWrite(LED_PIN, LOW); // Turn off LED
+        }
+
         delay(5);
       }
+      digitalWrite(LED_PIN, LOW); // Turn off LED
 
       this->gyroX_offset = sumX / 200;
       this->gyroY_offset = sumY / 200;
@@ -269,9 +287,9 @@ void setup() {
   pinMode(echo, INPUT);
 
   // set servo class to attatch to pinout
-  door_servo.attatch(servo_pin);
+  latch_servo.attatch(servo_pin);
   // move servo to zero degrees
-  door_servo.write(0);
+  latch_servo.write(servo_close_angle);
 }
 
 void loop() {
@@ -286,6 +304,7 @@ void loop() {
   }
 
   long pressDuration = releasedTime - pressedTime;
+  
 
   // run code here for button PRESS lengths of times
   if( pressDuration > calibration_long_press ) { // FOR CALIBRATION
@@ -304,15 +323,47 @@ void loop() {
   lastState = currentState;
   
   
+  
   if (armed) {
+    // get echo location data
+    digitalWrite(trig, HIGH);
+    delayMicroseconds(10);
+    digitalWrite(trig, LOW);
+    lecture_echo = pulseIn(echo, HIGH);
+    cm = (lecture_echo) / 58;
+
+    // get accelerometer data    
     mpu->getMpuModuleData();
     mpu->printOutput();
     mpu->printRelativeAngleOutput();
-    delay(1000);
+
+    
+    
+    // TODO: concat 3 dimensional accelerations into one direction
+    float acceleration = ax; // used to determine current velocity
+    
+    // TODO: calculate velocity based off acxcelerations
+    // or embed into the function to make this easier
+    float velocity = 0.6; // meters per second
+    
+    // TODO: concat 3 dimensional angles into one direction
+    float angle = mpu->relativeAngX; // concurrent angle for quad copter and its direction
+
+    float height = cm / 10; // get instentaneous value for height in meters
+
+    // CODE FOR LEGIBILITY
+    float velocity_y = cos(angle)*velocity;
+    float velocity_x = sin(angle)*velocity;
+
+    // float time = -velocity_y + sqrt(velocity_y*velocity_y + 2*gravity*height);
+    float x_travel = velocity_x * time; // distance object will travel
+    float x_target = tan(angle) * (height - rail_over_target_intercept); // distance to the target, remove 
+    
+    if (x_target <= x_travel) {
+        // release the mechanism
+        latch_servo.write(servo_open_angle);
+    }
   }
-  
-  
-  digitalWrite(LED_PIN, LOW); // Turn off LED
   
   
 }
