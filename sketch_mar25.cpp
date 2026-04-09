@@ -1,0 +1,410 @@
+#include <Wire.h>
+#include <math.h>
+#include <Servo.h> 
+
+// variables to input and change
+float rail_over_target_intercept = 0.5; // 1 meter where the rail is above the target
+float gravity = 9.81;
+
+int calibration_long_press = 7000; // milliseconds to hold the button to go into this calibration mode
+int arming_long_press = 2000; // arm the program
+int short_press = 200;
+bool lastButtonState = HIGH; // Assume pull-up, so HIGH means not pressed
+unsigned long lastDebounceTime = 0;
+const unsigned long debounceDelay = 50; // milliseconds
+
+int servo_close_angle = 0;
+int servo_open_angle = 70;
+
+// pins
+const int BUTTON_PIN = 12; // Pin connected to the button
+const int LED_PIN = 8; // Pin connected to the LED
+bool ledState = false;
+// echo location pin
+int trig = 4;
+int echo = 5;
+int servo_pin = 6;
+
+// i2c pins are fixed to the board so no need to set them
+
+
+
+// active changing variables
+int armed = false;
+
+long lecture_echo;
+long cm;
+
+// servo settings
+Servo latch_servo;
+
+
+// Variables will change:
+int lastState = LOW;  // the previous state from the input pin
+int currentState;     // the current reading from the input pin
+unsigned long pressedTime  = 0;
+unsigned long releasedTime = 0;
+
+
+
+// MPU6050 Registers
+#define MPU6050_ADDR   0x68
+#define ACCEL_XOUT_H   0x3B
+#define GYRO_XOUT_H    0x43
+
+// assist using https://controllerstech.com/mpu6050-arduino-tutorial/
+// for conneting the I2C mpu6050 device
+
+class MpuModule {
+  public:
+    // Scales
+    float accScale = 16384.0;   // For ±2g (this value is 1g in raw data, always preset in Z so remove it using code)
+    float gyroScale = 131.0;    // For ±250 °/s
+
+    float ignoreDegreesChange = 0.1; // ignore values less then 0.1deg/s
+    float ignoreAccelerationChange = 0.1; // ignore values less then 0.1g of change (0.98ms2)
+      // Calibration Offsets
+    long accX_offset = 0, accY_offset = 0, accZ_offset = 0;
+    long gyroX_offset = 0, gyroY_offset = 0, gyroZ_offset = 0;
+
+    float ax, ay, az;
+    float gx, gy, gz;
+
+    float relativeX, relativeY, relativeZ;
+    float relativeAngX, relativeAngY, relativeAngZ;
+
+    bool isUpsideDown = false;
+
+    void printOutput() {
+      // -------- Print Results --------
+      Serial.print("Acc(g): ");
+      Serial.print(this->ax); Serial.print(", ");
+      Serial.print(this->ay); Serial.print(", ");
+      Serial.println(this->az);
+
+      Serial.print("Gyro(dps): ");
+      Serial.print(this->gx); Serial.print(", ");
+      Serial.print(this->gy); Serial.print(", ");
+      Serial.println(this->gz);
+
+      Serial.println("---------------------");
+    }
+
+    void printCalibrationOutput() {
+      // -------- Print Results --------
+      Serial.println("Calibration offsets: ");
+      Serial.print("Acc(g): ");
+      Serial.print(this->accX_offset); Serial.print(", ");
+      Serial.print(this->accY_offset); Serial.print(", ");
+      Serial.println(this->accZ_offset);
+
+      Serial.print("Gyro(dps): ");
+      Serial.print(this->gyroX_offset); Serial.print(", ");
+      Serial.print(this->gyroY_offset); Serial.print(", ");
+      Serial.println(this->gyroZ_offset);
+
+      Serial.println("---------------------");
+    }
+
+    void printRelativeAngleOutput() {
+      // -------- Print Results --------
+      Serial.println("Relative Angle: ");
+      Serial.print(this->relativeAngX); Serial.print(", ");
+      Serial.print(this->relativeAngY); Serial.print(", ");
+      Serial.println(this->relativeAngZ);
+
+      Serial.println("---------------------");
+    }
+
+    void getMpuModuleData() {
+      int16_t rawAccX, rawAccY, rawAccZ;
+      int16_t rawGyroX, rawGyroY, rawGyroZ;
+
+      // ------ Read Accelerometer ------
+      Wire.beginTransmission(MPU6050_ADDR);
+      Wire.write(ACCEL_XOUT_H);
+      Wire.endTransmission(false);
+      Wire.requestFrom(MPU6050_ADDR, 6, true);
+
+      rawAccX = (Wire.read() << 8) | Wire.read();
+      rawAccY = (Wire.read() << 8) | Wire.read();
+      rawAccZ = (Wire.read() << 8) | Wire.read();
+
+      // Apply offsets
+      rawAccX -= this->accX_offset;
+      rawAccY -= this->accY_offset;
+      rawAccZ -= this->accZ_offset;
+
+      // Convert to g
+      this->ax = rawAccX / this->accScale;
+      this->ay = rawAccY / this->accScale;
+      this->az = rawAccZ / this->accScale - 1;
+
+      // ------ Read Gyroscope ------
+      Wire.beginTransmission(MPU6050_ADDR);
+      Wire.write(GYRO_XOUT_H);
+      Wire.endTransmission(false);
+      Wire.requestFrom(MPU6050_ADDR, 6, true);
+
+      rawGyroX = (Wire.read() << 8) | Wire.read();
+      rawGyroY = (Wire.read() << 8) | Wire.read();
+      rawGyroZ = (Wire.read() << 8) | Wire.read();
+
+      // Apply offsets
+      rawGyroX -= this->gyroX_offset;
+      rawGyroY -= this->gyroY_offset;
+      rawGyroZ -= this->gyroZ_offset;
+
+      // Convert to degrees/sec
+      this->gx = rawGyroX / this->gyroScale;
+      this->gy = rawGyroY / this->gyroScale;
+      this->gz = rawGyroZ / this->gyroScale;
+
+      // MpuModuleData output = {ax, ay, az, gx, gy, gz};
+      // calculate relative angles using G forces and triganometry
+      this->relativeAngX = asin(this->ax) * (180.0 / PI); // 0 is inline, 1 is at an angle, flat to the ground
+      this->relativeAngY = asin(this->ay) * (180.0 / PI);
+      this->relativeAngZ = asin(this->az) * (180.0 / PI);
+
+      if (isnan(this->relativeAngX) || isnan(this->relativeAngY) || isnan(this->relativeAngZ)) {
+        this->isUpsideDown = true;
+      }
+      else {
+        this->isUpsideDown = false;
+      }
+
+
+      return;
+    }
+
+    // ---------------- Calibration Functions ---------------- //
+
+    void calibrateAccelerometer() {
+      long sumX = 0, sumY = 0, sumZ = 0;
+
+      Serial.println("Calibrating Accelerometer... Do not move!");
+
+      for (int i = 0; i < 200; i++) {
+        Wire.beginTransmission(MPU6050_ADDR);
+        Wire.write(ACCEL_XOUT_H);
+        Wire.endTransmission(false);
+        Wire.requestFrom(MPU6050_ADDR, 6, true);
+
+        sumX += (Wire.read() << 8) | Wire.read();
+        sumY += (Wire.read() << 8) | Wire.read();
+        sumZ += (Wire.read() << 8) | Wire.read();
+
+        // every 10*5 miliseconds flash the led
+        if ((i % 10) < 7) {
+          digitalWrite(LED_PIN, HIGH); // Turn on LED
+        }
+        else {
+          digitalWrite(LED_PIN, LOW); // Turn off LED
+        }
+
+        delay(5);
+      }
+      digitalWrite(LED_PIN, LOW); // Turn off LED
+
+      this->accX_offset = sumX / 200;
+      this->accY_offset = sumY / 200;
+      this->accZ_offset = (sumZ / 200) - 16384; // 1g adjustment
+
+      Serial.println("Accelerometer Calibration Done.");
+    }
+
+    void calibrateGyroscope() {
+      long sumX = 0, sumY = 0, sumZ = 0;
+
+      Serial.println("Calibrating Gyroscope... Do not move!");
+
+      for (int i = 0; i < 200; i++) {
+        Wire.beginTransmission(MPU6050_ADDR);
+        Wire.write(GYRO_XOUT_H);
+        Wire.endTransmission(false);
+        Wire.requestFrom(MPU6050_ADDR, 6, true);
+
+        sumX += (Wire.read() << 8) | Wire.read();
+        sumY += (Wire.read() << 8) | Wire.read();
+        sumZ += (Wire.read() << 8) | Wire.read();
+
+        // every 10*5 miliseconds flash the led
+        if ((i % 10) < 4) {
+          digitalWrite(LED_PIN, HIGH); // Turn on LED
+        }
+        else {
+          digitalWrite(LED_PIN, LOW); // Turn off LED
+        }
+
+        delay(5);
+      }
+      digitalWrite(LED_PIN, LOW); // Turn off LED
+
+      this->gyroX_offset = sumX / 200;
+      this->gyroY_offset = sumY / 200;
+      this->gyroZ_offset = sumZ / 200;
+
+      Serial.println("Gyroscope Calibration Done.");
+    }
+};
+
+
+
+
+// 
+
+
+
+
+MpuModule* mpu = new MpuModule();
+
+void setup() {
+  Serial.begin(9600);
+  // LED for status and button for calibration reset
+  pinMode(BUTTON_PIN, INPUT); // Configure button pin as input with internal pull-up resistor
+  pinMode(LED_PIN, OUTPUT); // Configure LED pin as output
+  digitalWrite(LED_PIN, LOW); // Turn off LED
+
+  Wire.begin();
+
+  // Wake up MPU6050 – write 0 to power management register
+  Wire.beginTransmission(MPU6050_ADDR);
+  Wire.write(0x6B);
+  Wire.write(0); 
+  Wire.endTransmission();
+
+  delay(1000);
+
+  mpu->calibrateAccelerometer();
+  mpu->calibrateGyroscope();
+
+  mpu->printCalibrationOutput();
+
+  // calibrateAccelerometer();
+  // calibrateGyroscope();
+
+  Serial.println("\nStarting Final Reading...\n");
+
+
+  // setup echo location pins
+  pinMode(trig, OUTPUT);
+  digitalWrite(trig, LOW);
+  pinMode(echo, INPUT);
+
+  // set servo class to attatch to pinout
+  latch_servo.attach(servo_pin);
+  // move servo to zero degrees
+  latch_servo.write(servo_close_angle);
+
+  digitalWrite(LED_PIN, LOW); // Turn off LED
+}
+
+void loop() {
+  // read the state of the pushbutton value:
+  currentState = digitalRead(BUTTON_PIN);
+
+  // check if the pushbutton is pressed. If it is, the buttonState is HIGH:
+  if (currentState == HIGH) {
+    // turn LED on:
+    digitalWrite(LED_PIN, HIGH);
+    armed = true;
+  } else {
+    // turn LED off:
+    digitalWrite(LED_PIN, LOW);
+    armed = false;
+  }
+  // digitalWrite(LED_PIN, ledState);
+  // ledState = !ledState;
+  // delay(1000);
+  // TODO: make sure the calibration function only runs once on this button press.
+  // currentState = digitalRead(BUTTON_PIN); // Read the button state
+
+  // if(lastState == HIGH && currentState == LOW) {        // button is released
+  //   pressedTime = millis();
+  // }
+  // else if(lastState == LOW && currentState == HIGH) { // button is pressed
+  //   releasedTime = millis();
+  // }
+
+  // long pressDuration = pressedTime - releasedTime;
+  
+
+  // // run code here for button PRESS lengths of times
+  // // if( pressDuration > calibration_long_press ) { // FOR CALIBRATION
+  // //   mpu->calibrateAccelerometer();
+  // //   mpu->calibrateGyroscope();
+  // // }
+  // if ( pressDuration > arming_long_press ) { // TO ARM THE DEVICE
+  //   armed = true;
+  //   pinMode(LED_PIN, HIGH); 
+  // }
+  // else if ( pressDuration > short_press ) { // FOR RELEASING IT WHILE SETTING UP THE DEVICE
+  //   // unarmed if button pressed again
+  //   armed = false;
+  //   pinMode(LED_PIN, LOW); 
+  //   latch_servo.write(servo_close_angle);
+  // }
+
+  // // reset button state so code doesnt loop over
+  // lastState = currentState;
+
+
+  Serial.print("Armed state: "); Serial.println(armed);
+  // Serial.print("lastDebounceTimee: "); Serial.println(lastDebounceTime);
+  // Serial.print("pressDuration: "); Serial.println(pressDuration);
+  
+  
+  
+  if (armed) { 
+  // Initialize the built-in LED pin as an output  
+    
+
+  
+
+    // get echo location data
+    digitalWrite(trig, HIGH);
+    delayMicroseconds(10);
+    digitalWrite(trig, LOW);
+    lecture_echo = pulseIn(echo, HIGH);
+    cm = (lecture_echo) / 58;
+
+    // get accelerometer data    
+    mpu->getMpuModuleData();
+    // mpu->printOutput();
+    mpu->printRelativeAngleOutput();
+
+    
+    
+    // TODO: concat 3 dimensional accelerations into one direction
+    float acceleration = mpu->ax; // used to determine current velocity
+    
+    // TODO: calculate velocity based off acxcelerations
+    // or embed into the function to make this easier
+    float velocity = 0.6; // meters per second
+    
+    // TODO: concat 3 dimensional angles into one direction
+    float angle = mpu->relativeAngX; // concurrent angle for quad copter and its direction
+
+    float height = cm / 10; // get instentaneous value for height in meters
+
+    // CODE FOR LEGIBILITY
+    float velocity_y = cos(angle)*velocity;
+    float velocity_x = sin(angle)*velocity;
+
+    // float time = -velocity_y + sqrt(velocity_y*velocity_y + 2*gravity*height);
+    //float x_travel = velocity_x * time; // distance object will travel
+    float x_target = tan(angle) * (height - rail_over_target_intercept); // distance to the target, remove 
+    
+    // if (x_target <= x_travel) {
+    //     // release the mechanism
+    //     latch_servo.write(servo_open_angle);
+    // }
+    if (height <= rail_over_target_intercept) {
+        // release the mechanism
+        latch_servo.write(servo_open_angle);
+    }
+  }
+  
+  
+}
+
