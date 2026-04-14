@@ -66,6 +66,11 @@ class MpuModule {
     float ax, ay, az;
     float gx, gy, gz;
 
+      // Previous accelerations, used to calculate velocity
+    float lax, lay, laz;
+    float velocity = 0;
+    float last_time = 0;
+
     float relativeX, relativeY, relativeZ;
     float relativeAngX, relativeAngY, relativeAngZ;
 
@@ -113,6 +118,9 @@ class MpuModule {
     }
 
     void getMpuModuleData() {
+      this->lax = this->ax;
+      this->lay = this->ay;
+      this->laz = this->az;
       int16_t rawAccX, rawAccY, rawAccZ;
       int16_t rawGyroX, rawGyroY, rawGyroZ;
 
@@ -169,7 +177,13 @@ class MpuModule {
         this->isUpsideDown = false;
       }
 
+      // Calculate and store relative velocity
+      int currentElapsedTime = millis();
+      int previousElapsedTime = this->last_time;
 
+      this->velocity += (this->ax - this->lax) * gravity * (currentElapsedTime - previousElapsedTime) * 0.001; // change in acceleration, multiple gravity and then use seconds rather then millis
+      // velocity is summation of change in velocity, thus add it to previous value. 
+      this->last_time = millis(); // use millis again rather then currentElapsedTime
       return;
     }
 
@@ -340,11 +354,12 @@ void loop() {
     
     
     // TODO: concat 3 dimensional accelerations into one direction
-    float acceleration = ax; // used to determine current velocity
+    //float acceleration = ax; // used to determine current velocity
+    // not needed due to velocity calculations in MPU class
     
     // TODO: calculate velocity based off acxcelerations
     // or embed into the function to make this easier
-    float velocity = 0.6; // meters per second
+    float velocity = mpu->velocity; // meters per second
     
     // TODO: concat 3 dimensional angles into one direction
     float angle = mpu->relativeAngX; // concurrent angle for quad copter and its direction
